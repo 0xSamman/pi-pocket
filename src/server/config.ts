@@ -43,6 +43,10 @@ export interface User {
     role: Role;
     /** sha256 of the user's login token; the token itself is only kept for the owner. */
     tokenHash: string;
+    /** Hashes for additional devices, without their bearer tokens. */
+    tokenHashes?: string[];
+    /** Recent device invitation issuance times. */
+    deviceInviteTimes?: number[];
     createdAt: number;
     lastSeen?: number;
     /** Conversation ids of the only sessions this person may open; absent means every session. */
@@ -61,7 +65,10 @@ export interface User {
 /** An invite not yet used, kept by its code's sha256 (the code itself is only shown to whoever made it). */
 export interface StoredInvite {
     codeHash: string;
-    role: Role;
+    role: Role | "device";
+    targetId?: string;
+    creatorAccess?: string;
+    targetAccess?: string;
     /** The one session it is for; absent means every session. Never set for an owner invite. */
     session?: string;
     expiresAt: number;
@@ -121,7 +128,7 @@ export const DEFAULT_LIMIT_WAIT_HOURS = 6;
 /** Who may allow a risky tool call: anyone who can steer, or (for guests) only someone other than who asked. */
 export type ApprovalRule = "anyone" | "others";
 
-function newToken(): string {
+export function newToken(): string {
     return randomBytes(24).toString("base64url");
 }
 
@@ -141,6 +148,7 @@ export const MAX_INVITES = 50;
 
 /** `config.json` in the data directory, written atomically with mode 0600. */
 export class ConfigStore {
+    #deviceAccessChanges = 0;
     readonly file: string;
     #config: PocketConfig;
 
@@ -361,7 +369,17 @@ export class ConfigStore {
     userByToken(token: string): User | undefined {
         const hash = hashToken(token);
 
-        return this.#config.users.find((user) => sameHash(user.tokenHash, hash));
+        return this.#config.users.find(
+            (user) =>
+                sameHash(user.tokenHash, hash) ||
+                (user.tokenHashes ?? []).some((each) => sameHash(each, hash)),
+        );
+    }
+
+    isAdditionalToken(user: User, token: string): boolean {
+        const hash = hashToken(token);
+
+        return (user.tokenHashes ?? []).some((each) => sameHash(each, hash));
     }
 
     userById(id: string): User | undefined {
@@ -383,6 +401,19 @@ export class ConfigStore {
         this.save();
 
         return { user, token };
+    }
+
+    addUserToken(id: string, token: string): boolean {
+        const user = this.userById(id);
+
+        if (user === undefined || (user.tokenHashes?.length ?? 0) >= 10) {
+            return false;
+        }
+
+        user.tokenHashes = [...(user.tokenHashes ?? []), hashToken(token)];
+        this.save();
+
+        return true;
     }
 
     updateUser(
@@ -435,7 +466,7 @@ export class ConfigStore {
 
         if (!this.#config.users.some((user) => user.id === id)) {
             this.#config.invites = this.#config.invites?.filter(
-                (invite) => invite.createdBy !== id,
+                (invite) => invite.createdBy !== id && invite.targetId !== id,
             );
         }
 
@@ -462,7 +493,16 @@ export class ConfigStore {
         this.#pruneInvites();
         const hash = hashToken(code);
 
-        return this.#config.invites?.find((invite) => sameHash(invite.codeHash, hash));
+        return this.#config.invites?.find(
+            (invite) =>
+                sameHash(invite.codeHash, hash) &&
+                ((invite.role !== "device" && invite.role !== "owner") ||
+                    (invite.creatorAccess !== undefined &&
+                        invite.targetAccess !== undefined &&
+                        invite.creatorAccess === this.deviceAccess(invite.createdBy) &&
+                        invite.targetAccess ===
+                            this.deviceAccess(invite.targetId ?? invite.createdBy))),
+        );
     }
 
     /** Remove an invite, and say whether it was there (and live). */
@@ -512,7 +552,51 @@ export class ConfigStore {
         return token;
     }
 
+    get devicePairingBlocked(): boolean {
+        return this.#deviceAccessChanges > 0;
+    }
+
+    /** Guard any future asynchronous personal access mutation. */
+    async withDeviceAccessChange<T>(change: () => Promise<T>): Promise<T> {
+        this.#deviceAccessChanges++;
+
+        try {
+            this.#config.invites = this.#config.invites?.filter(
+                (invite) => invite.role !== "device" && invite.role !== "owner",
+            );
+            this.save();
+
+            return await change();
+        } finally {
+            this.#deviceAccessChanges--;
+        }
+    }
+
+    /** Security-relevant personal account state. Saving an access change revokes pending devices. */
+    deviceAccess(id: string): string | undefined {
+        const user = this.userById(id);
+
+        return user === undefined
+            ? undefined
+            : hashToken(
+                  JSON.stringify({
+                      role: user.role,
+                      sessions: user.sessions,
+                      tunnel: user.tunnel,
+                      tokenHash: user.tokenHash,
+                  }),
+              );
+    }
+
     save(): void {
+        this.#config.invites = this.#config.invites?.filter(
+            (invite) =>
+                (invite.role !== "device" && invite.role !== "owner") ||
+                (invite.creatorAccess !== undefined &&
+                    invite.targetAccess !== undefined &&
+                    invite.creatorAccess === this.deviceAccess(invite.createdBy) &&
+                    invite.targetAccess === this.deviceAccess(invite.targetId ?? invite.createdBy)),
+        );
         mkdirSync(dirname(this.file), { recursive: true, mode: 0o700 });
         const temp = `${this.file}.${process.pid}.tmp`;
 
