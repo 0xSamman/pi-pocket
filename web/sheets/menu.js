@@ -556,7 +556,8 @@ export function MenuSheet({ places = true }) {
                 )
             }
             ${item("Your name", () => openSheet({ type: "name" }), me?.name)}
-            ${collab() ? item("People", () => openSheet({ type: "people" }), me?.role === "viewer" ? "you can view" : "") : item("Sign in another device", () => openSheet({ type: "invite" }))}
+            ${collab() ? item("People", () => openSheet({ type: "people" }), me?.role === "viewer" ? "you can view" : "") : null}
+            ${item("Sign in another device", () => openSheet({ type: "invite", device: true }))}
             ${collab() && item("Notifications", () => openSheet({ type: "notifications" }), "Pi finished, approvals, chat")}
             ${item("Running now", openRunning, "everything Pi is doing")}
             ${view.conversation && item("Background", () => openSheet({ type: "background" }), "what commands print as they run")}

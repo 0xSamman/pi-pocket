@@ -2103,7 +2103,7 @@ test("invites carry a role and a session over HTTP, and viewers get 403 on steer
         const redeemed = await fetch(`${base}/join/${invite.code}`, {
             method: "POST",
             body: "name=Watcher",
-            headers: { "content-type": "application/x-www-form-urlencoded" },
+            headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
             redirect: "manual",
         });
         const token = decodeURIComponent(
@@ -2215,16 +2215,10 @@ test("the owner signs another device in as the owner: owner only, once, no one n
         assert.deepEqual(invite.grant, { role: "owner" });
         assert.equal((await call(guest.token, "invite", { role: "owner" })).status, 403);
         assert.equal((await call(viewer.token, "invite", { role: "owner" })).status, 403);
-        assert.deepEqual(
-            (
-                (await (
-                    await call(app.config.ownerToken, "invite", {
-                        role: "owner",
-                        session: Number(id),
-                    })
-                ).json()) as { grant: unknown }
-            ).grant,
-            { role: "owner" },
+        assert.equal(
+            (await call(app.config.ownerToken, "invite", { role: "owner", session: Number(id) }))
+                .status,
+            400,
         );
 
         // Another site cannot spend it.
@@ -2256,12 +2250,10 @@ test("the owner signs another device in as the owner: owner only, once, no one n
         // It works once.
         assert.equal((await signIn(invite.code, "same-origin")).status, 410);
 
-        // An owner invite made by anyone else (past the API's check) signs no one in.
+        // A forged owner invite is refused even past the API's check.
         const auth = new Auth(app.config);
-        const forged = auth.createInvite(guest.user, { role: "owner" });
 
-        assert.equal(auth.redeem(forged.code, ""), undefined);
-        assert.equal(auth.invite(forged.code), undefined, "and it is spent");
+        assert.throws(() => auth.createInvite(guest.user, { role: "owner" }), { status: 403 });
 
         // A new owner token signs the device out.
         app.config.rotateOwnerToken();
@@ -2361,7 +2353,7 @@ test("an invite lasts as long as asked (an owner's always 15 minutes), outlives 
                     method: "POST",
                     redirect: "manual",
                     body: `name=${name}`,
-                    headers: { "content-type": "application/x-www-form-urlencoded" },
+                    headers: { "content-type": "application/x-www-form-urlencoded", origin: base },
                 }),
             ),
         );
@@ -2439,6 +2431,7 @@ test("people who signed in through a Cloudflare quick tunnel are removed once th
         ).json()) as { code: string };
         const headers: Record<string, string> = {
             "content-type": "application/x-www-form-urlencoded",
+            "sec-fetch-site": "same-origin",
             ...(host === undefined ? {} : { "x-forwarded-host": host }),
         };
         const joined = await fetch(`${base}/join/${code}`, {

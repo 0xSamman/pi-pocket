@@ -38,12 +38,29 @@ const cancelInvite = (invite) => {
             keepalive: true,
             headers: { "X-Pocket": "1", "content-type": "application/json" },
             body: JSON.stringify({ code: invite.code }),
-        }).catch(() => {});
+        })
+            .then((response) => {
+                if (!response.ok) {
+                    notify(
+                        "error",
+                        "Invitation cancellation failed. The link can stay valid until expiry.",
+                    );
+                }
+            })
+            .catch(() =>
+                notify(
+                    "error",
+                    "Invitation cancellation failed. The link can stay valid until expiry.",
+                ),
+            );
     }
 };
 
 export function InviteSheet({ session = null }) {
-    const { view, me, sessions } = store.state;
+    const { view, me, sessions, sheet } = store.state;
+    const isDevice = sheet?.device === true || !canSteer() || scoped();
+    const targetId = sheet?.targetId ?? me?.id;
+    const target = store.state.users.find((person) => person.id === targetId) ?? me;
     const here =
         session !== null
             ? (sessions.find((each) => each.id === session) ?? null)
@@ -59,7 +76,7 @@ export function InviteSheet({ session = null }) {
     // The newest invite could not be made: the sheet offers to try again rather than wait for ever.
     const [failed, setFailed] = useState(false);
     // What the sheet says now: an invite shows only while it was made for exactly this.
-    const asked = JSON.stringify([asOwner, role, only, minutes]);
+    const asked = JSON.stringify([isDevice, targetId, asOwner, role, only, minutes]);
     // Only the newest invite shows: one asked for before a change, answering late, must not stand for what the sheet says.
     const latest = useRef(0);
     // The invite the sheet last showed: a change to what it grants, or how long it lasts, ends it.
@@ -87,11 +104,13 @@ export function InviteSheet({ session = null }) {
             try {
                 answer = await api(
                     "invite",
-                    asOwner
-                        ? { role: "owner" }
-                        : collab()
-                          ? { role, ...(only && here ? { session: here.id } : {}), minutes }
-                          : { minutes },
+                    isDevice
+                        ? { role: "device", targetId }
+                        : asOwner
+                          ? { role: "owner" }
+                          : collab()
+                            ? { role, ...(only && here ? { session: here.id } : {}), minutes }
+                            : { minutes },
                 );
             } catch (error) {
                 if (ticket === latest.current) {
@@ -108,7 +127,10 @@ export function InviteSheet({ session = null }) {
             }
 
             // A server from before owner invites makes a guest's: never shown as the owner's.
-            if (asOwner && answer.grant?.role !== "owner") {
+            if (
+                (asOwner || (isDevice && target?.role === "owner")) &&
+                answer.grant?.role !== "owner"
+            ) {
                 setFailed(true);
 
                 throw new Error("Restart Pi Pocket to sign in another device as the owner.");
@@ -120,25 +142,36 @@ export function InviteSheet({ session = null }) {
 
     useEffect(() => {
         create({ replacing: true });
-    }, [role, only, asOwner, minutes]);
+    }, [isDevice, targetId, role, only, asOwner, minutes]);
     useEffect(
         () => () => {
             mounted.current = false;
+            cancelInvite(shown.current);
+            shown.current = null;
         },
         [],
     );
     // Shown only while it is what the sheet says, not for a frame after a change: above all, never an owner's invite
     // under a cleared box (which the server's answer says too).
     const invite =
-        made && made.asked === asked && (made.grant?.role === "owner") === asOwner ? made : null;
+        made &&
+        made.asked === asked &&
+        (isDevice
+            ? target?.role === "owner"
+                ? made.grant?.role === "owner"
+                : made.grant?.role === "device" && made.grant?.targetId === targetId
+            : (made.grant?.role === "owner") === asOwner)
+            ? made
+            : null;
     const where = only && here ? `only “${here.title}”` : "every session";
     // As long as the invite shown lasts (a server that does not say: 15 minutes), or, while one is made, as chosen.
     const lasting = LASTS.find(
         ([each]) => each === (invite ? (invite.minutes ?? 15) : minutes),
     )?.[2];
 
-    return html`<${Sheet} title="Invite someone" onClose=${closeSheet}>
+    return html`<${Sheet} title=${isDevice ? "Sign in another device" : "Invite someone"} onClose=${closeSheet}>
         ${
+            !isDevice &&
             me?.role === "owner" &&
             html`<label class="check">
                 <input
@@ -150,6 +183,7 @@ export function InviteSheet({ session = null }) {
             </label>`
         }
         ${
+            !isDevice &&
             collab() &&
             !asOwner &&
             html`<div class="field">
@@ -198,6 +232,7 @@ export function InviteSheet({ session = null }) {
             }`
         }
         ${
+            !isDevice &&
             !asOwner &&
             html`<div class="field">
                 <div class="label">Expires after</div>
@@ -216,8 +251,8 @@ export function InviteSheet({ session = null }) {
         }
         <p class="muted small">
             ${
-                asOwner
-                    ? "Scan this on your other device, or send it the link. That device signs in as you, the owner. It works once and expires in 15 minutes."
+                isDevice || asOwner
+                    ? `Verify the recipient's identity before sending this link. The device signs in as ${target?.name ?? "this person"} (${targetId}), with the same permissions. It works once and expires in 15 minutes. Existing devices stay signed in. Closing this sheet requests cancellation; if it fails, the link can stay valid until expiry.`
                     : `Scan this on the other device, or send it the link. It works once and expires ${lasting}. Whoever joins sees ${where}.`
             }
         </p>
@@ -379,6 +414,10 @@ function PeopleList() {
                         ${person.sessions ? ` · only ${person.sessions.map(sessionTitle).join(", ")}` : ""} · ${lastSeen(person)}
                     </div>
                 </div>
+                ${
+                    (person.id === me?.id || owner) &&
+                    html`<button class="button small" onClick=${() => openSheet({ type: "invite", device: true, targetId: person.id })}>Sign in a device</button>`
+                }
                 ${
                     owner &&
                     person.role !== "owner" &&

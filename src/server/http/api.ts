@@ -73,8 +73,59 @@ export function createApi(options: HttpOptions, auth: Auth) {
      * What an invite may grant: viewers and people invited to one session cannot invite anyone, and only the owner can
      * sign a device in as the owner (never for one session).
      */
-    const inviteGrant = (user: User, body: { role?: unknown; session?: unknown }): InviteGrant => {
+    const inviteGrant = (
+        user: User,
+        body: {
+            role?: unknown;
+            session?: unknown;
+            device?: unknown;
+            targetId?: unknown;
+            team?: unknown;
+            teamRole?: unknown;
+            admin?: unknown;
+        },
+    ): InviteGrant => {
+        if (body.device === true || body.role === "device") {
+            if (
+                body.session !== undefined ||
+                body.team !== undefined ||
+                body.teamRole !== undefined ||
+                body.admin !== undefined ||
+                (body.role !== undefined && body.role !== "device")
+            ) {
+                throw new HttpError(400, "A device invitation cannot change account access.");
+            }
+
+            if (body.targetId !== undefined && typeof body.targetId !== "string") {
+                throw new HttpError(400, "An existing account ID is required.");
+            }
+
+            const target = app.config.userById((body.targetId as string | undefined) ?? user.id);
+
+            if (!auth.canPair(app.config.userById(user.id), target)) {
+                throw new HttpError(403, "You cannot sign in a device for this account.");
+            }
+
+            return target!.role === "owner"
+                ? { role: "owner" }
+                : { role: "device", targetId: target!.id, name: target!.name };
+        }
+
+        if (
+            body.targetId !== undefined ||
+            body.device !== undefined ||
+            body.team !== undefined ||
+            body.teamRole !== undefined ||
+            body.admin !== undefined
+        ) {
+            throw new HttpError(400, "Invalid invitation fields.");
+        }
+
         if (body.role === "owner") {
+            if (body.session !== undefined) {
+                throw new HttpError(400, "An owner invitation cannot change account access.");
+            }
+
             requireOwner(user);
 
             return { role: "owner" };
@@ -119,7 +170,8 @@ export function createApi(options: HttpOptions, auth: Auth) {
         if (
             user.role === "owner" ||
             user.tunnel !== undefined ||
-            !parseCookies(request.headers.cookie)[COOKIE]
+            !parseCookies(request.headers.cookie)[COOKIE] ||
+            app.config.isAdditionalToken(user, parseCookies(request.headers.cookie)[COOKIE]!)
         ) {
             return;
         }
@@ -947,6 +999,11 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 role?: unknown;
                 session?: unknown;
                 minutes?: unknown;
+                device?: unknown;
+                targetId?: unknown;
+                team?: unknown;
+                teamRole?: unknown;
+                admin?: unknown;
             };
             const grant = inviteGrant(user, body);
             const invite = auth.createInvite(user, grant, inviteMinutes(body));
@@ -962,7 +1019,8 @@ export function createApi(options: HttpOptions, auth: Auth) {
             // A tunnel the launcher started is the way in for other devices.
             const tunnel = loopback ? app.access?.url : undefined;
             const base = tunnel ?? lan[0] ?? here;
-            const link = `${base}/join/${invite.code}`;
+            const invitePath = `/join/${invite.code}?proof=${invite.proof}`;
+            const link = `${base}${invitePath}`;
             // An invite whose QR code could not be made is never shown: it ends rather than stay live, unseen.
             const svg = await QRCode.toString(link, {
                 type: "svg",
@@ -980,7 +1038,7 @@ export function createApi(options: HttpOptions, auth: Auth) {
                 url: link,
                 svg,
                 alternatives: (tunnel === undefined ? lan.slice(1) : lan).map(
-                    (address) => `${address}/join/${invite.code}`,
+                    (address) => `${address}${invitePath}`,
                 ),
                 // Only this device can open a loopback link.
                 local: loopback && lan.length === 0 && tunnel === undefined,
